@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-white antialiased;
+  }
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.5); }
+::-webkit-scrollbar-thumb { background: rgba(99, 102, 241, 0.3); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, 0.5); }
+
+/* Custom overlay for canvas */
+canvas { image-rendering: optimizeQuality; }
+
+/* Progress bar */
+.progress { @apply bg-slate-800 rounded-full h-2; }
+.progress-bar { @apply bg-indigo-500 h-full rounded-full transition-width duration-500; }
+
+/* Draggable elements */
+.draggable { @apply cursor-grab; }
+.dragging { @apply cursor-grabbing; }
+
+/* Card hover */
+.card-hover { @apply transition-all duration-300 hover:scale-[1.02] hover:border-indigo-500/50; }
+
+/* Stats number */
+.stat-number { @apply text-4xl font-bold; }

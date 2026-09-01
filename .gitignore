@@ -1,0 +1,28 @@
+# Node modules
+node_modules/
+
+# OS files
+.DS_Store
+.CFUserTextEncoding
+
+# Local app Python
+__pycache__/
+*.pyc
+*.pyd
+.env
+
+# Build artifacts
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs and temp
+*.log
+tmp/
+temp/
+
+# Environment
+.env*
