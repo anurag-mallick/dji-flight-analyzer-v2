@@ -135,6 +135,7 @@ class BatteryHealth(BaseModel):
     early_avg_rate: float
     recent_avg_rate: float
     status: str
+    prediction: Optional[dict] = None
 
 
 class AircraftInfo(BaseModel):

@@ -27,6 +27,7 @@ Unlike cloud-based tools like Airdata, DJI Flight Analyzer runs entirely on your
 - **Firmware version detection** — flight controller/gimbal/camera/RC/battery firmware versions, when present in the log
 - **Battery view** — discharge curve, discharge rate, estimated flight time, single-flight health indicator
 - **Battery fleet tracking** — per-battery discharge-rate trend across flights, degradation status, capacity/notes editor
+- **Battery degradation forecast** — a linear projection of discharge-rate trend (with fit-quality R²) estimating flights remaining until "Degrading"/"Replace Soon" status, requires 4+ flights with telemetry on that battery
 - **Aircraft fleet tracking** — flight hours vs. service interval with due/overdue status, nickname/notes editor, maintenance log
 - **Flight comparison** — select 2-4 flights and overlay altitude/speed/battery normalized by % of flight duration
 - **Export** — JSON, CSV, KML, GeoJSON (requires full telemetry)

@@ -181,6 +181,64 @@ def get_battery_flights(battery_id: str) -> List[Dict[str, Any]]:
     return flights
 
 
+MIN_FLIGHTS_FOR_PREDICTION = 4
+
+
+def _linear_regression(xs: List[float], ys: List[float]):
+    """Ordinary least-squares fit. Returns (slope, intercept, r_squared)."""
+    n = len(xs)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    ss_xx = sum((x - mean_x) ** 2 for x in xs)
+    ss_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    ss_yy = sum((y - mean_y) ** 2 for y in ys)
+    slope = ss_xy / ss_xx if ss_xx > 0 else 0.0
+    intercept = mean_y - slope * mean_x
+    r_squared = (ss_xy ** 2) / (ss_xx * ss_yy) if ss_xx > 0 and ss_yy > 0 else 0.0
+    return slope, intercept, r_squared
+
+
+def predict_battery_degradation(discharge_rates: List[float], early_avg_rate: float) -> Dict[str, Any]:
+    """Project future discharge-rate degradation from a linear trend over recorded
+    flights. This is a rough estimate from very few data points, not a guarantee -
+    the returned r_squared indicates how well the flights actually fit a straight line."""
+    n = len(discharge_rates)
+    if n < MIN_FLIGHTS_FOR_PREDICTION or early_avg_rate <= 0:
+        return {
+            "available": False,
+            "reason": f"Need at least {MIN_FLIGHTS_FOR_PREDICTION} flights with telemetry to project a trend (have {n}).",
+        }
+
+    xs = list(range(n))
+    slope, intercept, r_squared = _linear_regression(xs, discharge_rates)
+
+    if slope <= 0:
+        return {
+            "available": True,
+            "trending_toward_failure": False,
+            "slope_pct_per_min_per_flight": round(slope, 4),
+            "r_squared": round(r_squared, 2),
+            "sample_size": n,
+            "reason": "Discharge rate is flat or improving across recorded flights - no degrading trend to project.",
+        }
+
+    current_index = n - 1
+
+    def flights_until(threshold_rate: float) -> int:
+        crossing_index = (threshold_rate - intercept) / slope
+        return max(0, round(crossing_index - current_index))
+
+    return {
+        "available": True,
+        "trending_toward_failure": True,
+        "slope_pct_per_min_per_flight": round(slope, 4),
+        "r_squared": round(r_squared, 2),
+        "sample_size": n,
+        "projected_flights_to_yellow": flights_until(early_avg_rate * 1.10),
+        "projected_flights_to_red": flights_until(early_avg_rate * 1.20),
+    }
+
+
 def get_battery_health_stats(battery_id: str) -> Dict[str, Any]:
     """Compute battery health stats across all linked flights."""
     flights = get_battery_flights(battery_id)
@@ -230,6 +288,7 @@ def get_battery_health_stats(battery_id: str) -> Dict[str, Any]:
         "early_avg_rate": round(early_avg, 3),
         "recent_avg_rate": round(recent_avg, 3),
         "status": status,
+        "prediction": predict_battery_degradation(discharge_rates, early_avg),
     }
 
 

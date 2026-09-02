@@ -14,6 +14,17 @@ interface Battery {
   flight_count: number
 }
 
+interface DegradationPrediction {
+  available: boolean
+  reason?: string
+  trending_toward_failure?: boolean
+  slope_pct_per_min_per_flight?: number
+  r_squared?: number
+  sample_size?: number
+  projected_flights_to_yellow?: number
+  projected_flights_to_red?: number
+}
+
 interface BatteryHealth {
   flight_count: number
   avg_discharge_rate: number
@@ -23,6 +34,7 @@ interface BatteryHealth {
   early_avg_rate: number
   recent_avg_rate: number
   status: 'green' | 'yellow' | 'red'
+  prediction?: DegradationPrediction
 }
 
 interface FlightSummary {
@@ -238,6 +250,9 @@ export function BatteryDetail({ battery, onClose }: BatteryDetailProps) {
             </div>
           )}
 
+          {/* Degradation Forecast */}
+          {health?.prediction && <DegradationForecast prediction={health.prediction} />}
+
           {/* Flight History Table */}
           <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200">
@@ -286,6 +301,58 @@ export function BatteryDetail({ battery, onClose }: BatteryDetailProps) {
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+function DegradationForecast({ prediction }: { prediction: DegradationPrediction }) {
+  if (!prediction.available) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-xl p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Degradation Forecast</h3>
+        <p className="text-sm text-gray-500">{prediction.reason}</p>
+      </div>
+    )
+  }
+
+  if (!prediction.trending_toward_failure) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-xl p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Degradation Forecast</h3>
+        <div className="bg-green-50 border border-green-200 text-green-900 rounded-lg p-3">
+          <p className="text-sm font-medium">No degrading trend detected</p>
+          <p className="text-xs mt-1 opacity-90">{prediction.reason}</p>
+        </div>
+      </div>
+    )
+  }
+
+  const lowConfidence = (prediction.r_squared ?? 0) < 0.3
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl p-6">
+      <h3 className="text-lg font-semibold text-gray-900 mb-1">Degradation Forecast</h3>
+      <p className="text-xs text-gray-500 mb-4">
+        A linear projection of discharge rate over {prediction.sample_size} flights — a rough estimate, not a guarantee.
+      </p>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-center">
+          <p className="text-2xl font-bold text-amber-800">
+            {prediction.projected_flights_to_yellow === 0 ? 'Now' : `~${prediction.projected_flights_to_yellow}`}
+          </p>
+          <p className="text-xs text-amber-700 mt-1">flights to "Degrading" status</p>
+        </div>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+          <p className="text-2xl font-bold text-red-800">
+            {prediction.projected_flights_to_red === 0 ? 'Now' : `~${prediction.projected_flights_to_red}`}
+          </p>
+          <p className="text-xs text-red-700 mt-1">flights to "Replace Soon" status</p>
+        </div>
+      </div>
+      <p className="text-xs text-gray-500 mt-3">
+        Fit quality (R&sup2;): {prediction.r_squared}
+        {lowConfidence && ' — low confidence given how few/noisy the data points are; treat this projection with caution.'}
+      </p>
     </div>
   )
 }
