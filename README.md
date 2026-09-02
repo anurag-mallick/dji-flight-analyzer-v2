@@ -14,24 +14,30 @@ Unlike cloud-based tools like Airdata, DJI Flight Analyzer runs entirely on your
 
 ## ✅ Currently Implemented
 
-### Web App (`webapp/`) — Client-side React + Vite + Tailwind
-- **Drag & drop .txt flight log upload** — Multiple files supported
-- **Format detection** — Identifies DJI Fly v12, v13, v14 logs
-- **Header parsing** — Aircraft, serial, duration, location, max altitude/distance/speed, battery %, captures
-- **Interactive map** — Leaflet with flight path, takeoff/landing markers, playback scrubber
+### Web App (`webapp/`) — React + Vite + Tailwind, backed by the local API
+- **Drag & drop .txt flight log upload** — multiple files, uploaded straight to the local backend for decoding and persistence
+- **Flight list** — search/filter by filename, aircraft, or tag; tag editor per flight
+- **Interactive 2D map** — Leaflet with flight path, takeoff/landing markers, OpenStreetMap/Esri satellite/OpenTopoMap layers, plus opt-in Google roadmap/satellite/hybrid tile layers (hobbyist-use only — see note in `MapView.tsx`)
+- **3D flight path view** — Three.js scene rendering the GPS track with altitude on the vertical axis (ground grid is a flat spatial reference, not real terrain elevation data)
+- **Animated replay** — play/pause/step/speed controls that drive the map and stat readout forward through the recorded telemetry (there is no control-input data in the log, so this is a replay, not a physics simulation)
 - **Charts** — Recharts panels for altitude, speed, vertical speed, battery, voltage, GPS sats, RC signal, temperature, gimbal attitude
-- **Battery view** — Discharge curve, discharge rate, estimated flight time, health indicator
+- **Flight Insights** — rule-based, fully local analysis of the flight's own telemetry (GPS dropouts, weak RC signal, low landing battery, abrupt altitude changes, temperature extremes) with plain-English suggestions
+- **Battery view** — discharge curve, discharge rate, estimated flight time, single-flight health indicator
+- **Battery fleet tracking** — per-battery discharge-rate trend across flights, degradation status, capacity/notes editor
+- **Aircraft fleet tracking** — flight hours vs. service interval with due/overdue status, nickname/notes editor, maintenance log
+- **Flight comparison** — select 2-4 flights and overlay altitude/speed/battery normalized by % of flight duration
 - **Export** — JSON, CSV, KML, GeoJSON (requires full telemetry)
-- **API key input** — Optional DJI key for full telemetry via local backend
 
 ### Local Backend (`local-app/`) — FastAPI + pydjirecord
-- **Full telemetry decryption** — Uses DJI API key + pydjirecord for v13/v14 logs
-- **Batch upload** — Process multiple logs at once
-- **Complete telemetry** — 1Hz GPS points with all sensor data
-- **Flight phase detection** — Takeoff, ascent, cruise, descent, landing
-- **Statistics** — 30+ computed metrics per flight
+- **Full telemetry decoding** — parses the binary DJI Fly log via `pydjirecord`'s `DJILog`; v12 logs decode with no key, v13+ logs require a DJI API key (`fetch_keychains`) to decrypt
+- **Batch upload** — process multiple logs at once
+- **Flight phase detection** — takeoff, ascent, cruise, descent, landing
+- **Statistics** — computed metrics per flight
+- **Fleet & maintenance** — aircraft/battery records auto-linked from log serial numbers, maintenance log entries, service-interval tracking
+- **Flight comparison endpoint** — normalized time-series for 2-4 flights
+- **Search, tagging, delete** — filter flights by date/aircraft/battery/tag/free text
 - **Export endpoints** — CSV, KML, GeoJSON
-- **Runs locally** — Your data never hits the internet
+- **Runs locally** — your data never hits the internet, except the DJI keychain API call for v13+ decryption and (optionally) map tile requests
 
 ## 📁 Project Structure
 
@@ -65,7 +71,7 @@ dji-flight-analyzer-v2/
 cd webapp
 npm install
 npm run dev      # http://localhost:5173
-npm run build    # Deploy dist/ to GitHub Pages
+npm run build    # produces dist/ — see Deployment below before hosting it separately
 ```
 
 **Features without API key:** Format detection, header data, file management, empty chart/map placeholders  
@@ -80,7 +86,15 @@ pip install -r requirements.txt
 python app.py    # http://localhost:8000 (API docs at /docs)
 ```
 
-Then in the web app, enter your DJI API key — it will call the local backend for full decryption.
+The API key lives server-side in `local-app/.env` (`DJI_API_KEY`) — it is used only by the backend's `fetch_keychains` call to DJI for v13+ decryption and is never entered in or sent from the web app.
+
+## 🌐 Deployment
+
+This app is local-first by design: the web app always calls its backend at a relative `/api/...` path, and both are meant to run together on your own machine (`npm run dev` on :5173 with a proxy to :8000, exactly as in Quick Start above).
+
+`webapp/` builds to a portable static bundle (`npm run build` → `webapp/dist/`, already configured with `base: './'`), so it can technically be hosted on GitHub Pages or imported into Vercel as a static site. Doing so today only serves the UI shell, though — a frontend hosted on GitHub Pages/Vercel has no backend at that same origin, so every `/api/...` call will fail and the app will show empty flights/batteries/aircraft lists rather than something useful. There is currently no build-time or runtime setting to point the deployed frontend at a different backend URL (see Roadmap) — that is a deliberate architecture decision for now, not an oversight, so treat GitHub Pages/Vercel hosting as a UI-only preview rather than a working deployment until that is added.
+
+For real use, run both `webapp` and `local-app` together on your own machine as described in Quick Start.
 
 ## 🔑 DJI API Key
 
@@ -95,7 +109,7 @@ Then in the web app, enter your DJI API key — it will call the local backend f
 |-------|------------|
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS |
 | Charts | Recharts |
-| Maps | Leaflet + react-leaflet |
+| Maps | Leaflet + react-leaflet (2D), Three.js (3D flight path) |
 | Backend | FastAPI, Python 3.10+ |
 | Decryption | pydjirecord (DJI official format) |
 | Deploy | GitHub Pages (webapp), Local (backend) |
@@ -113,14 +127,15 @@ Then in the web app, enter your DJI API key — it will call the local backend f
 
 ## 🗺 Roadmap
 
-- [ ] SQLite persistence for flight history
-- [ ] Multi-flight battery degradation trends
+- [ ] SQLite persistence for flight history (currently one JSON file per flight/battery/aircraft)
 - [ ] Waypoint/POI overlay on map
 - [ ] Wind estimation from drift
 - [ ] Firmware version detection
 - [ ] Mobile-responsive touch controls
 - [ ] Dark mode
 - [ ] PWA support for offline use
+- [ ] Real terrain elevation in the 3D view (currently a flat reference grid, not elevation data)
+- [ ] Configurable backend URL so a GitHub Pages/Vercel-hosted frontend can reach a locally-running backend over CORS (deliberately not done yet — see Deployment)
 
 ## 📜 License
 

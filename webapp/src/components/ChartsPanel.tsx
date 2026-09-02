@@ -108,7 +108,7 @@ function VerticalSpeedChart({ data }: { data: ChartDataPoint[] }) {
           <XAxis dataKey="time" tick={{ fill: '#9ca3af', fontSize: 10 }} axisLine={false} tickLine={false} />
           <YAxis tick={{ fill: '#9ca3af', fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
           <Tooltip />
-          <Bar dataKey="verticalSpeed" fill="#f59e0b" radius={[2, 2, 0, 0]} maxBarWidth={8} />
+          <Bar dataKey="verticalSpeed" fill="#f59e0b" radius={[2, 2, 0, 0]} maxBarSize={8} />
         </ComposedChart>
       </ResponsiveContainer>
     </ChartCard>

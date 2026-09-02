@@ -1,116 +1,113 @@
-import React, { useState, useCallback, useEffect } from 'react'
-import { FlightUploader } from './components/FlightUploader'
-import { FlightList } from './components/FlightList'
+import React, { useCallback, useEffect, useState } from 'react'
+import { FlightList, PendingUpload } from './components/FlightList'
 import { FlightDetail } from './components/FlightDetail'
 import { StatsPanel } from './components/StatsPanel'
-import { MapView } from './components/MapView'
+import { FlightMapSection } from './components/FlightMapSection'
 import { ChartsPanel } from './components/ChartsPanel'
 import { BatteryView } from './components/BatteryView'
 import { ExportPanel } from './components/ExportPanel'
+import { FlightInsights } from './components/FlightInsights'
 import { BatteryList, BatteryDetail, Battery } from './components/BatteryViews'
-import { parseDJILog, DJIFlightData, DJILogHeader } from './lib/djiParser'
+import { AircraftView } from './components/AircraftView'
+import { CompareView } from './components/CompareView'
+import { BackendFlightSummary, BackendFlightDetail, DJIFlightData, backendDetailToFlightData } from './lib/djiParser'
 
-type ViewMode = 'flights' | 'flight-detail' | 'batteries' | 'battery-detail'
-
-interface FlightRecord {
-  id: string
-  file: File
-  data: DJIFlightData
-  loadedAt: Date
-}
-
-interface BackendFlight {
-  id: string
-  filename: string
-  aircraft: string
-  format: string
-  flight_duration: number
-  max_altitude: number
-  max_distance: number
-  max_speed: number
-  battery_start: number
-  battery_end: number
-  has_full_telemetry: boolean
-  gps_point_count: number
-  upload_date: string
-  battery_id: string
-  aircraft_id: string
-}
+type ViewMode = 'flights' | 'flight-detail' | 'batteries' | 'battery-detail' | 'aircraft' | 'compare'
 
 function App() {
-  const [flights, setFlights] = useState<FlightRecord[]>([])
-  const [backendFlights, setBackendFlights] = useState<BackendFlight[]>([])
-  const [selectedFlight, setSelectedFlight] = useState<FlightRecord | null>(null)
-  const [selectedBackendFlight, setSelectedBackendFlight] = useState<BackendFlight | null>(null)
+  const [flights, setFlights] = useState<BackendFlightSummary[]>([])
+  const [pending, setPending] = useState<PendingUpload[]>([])
   const [viewMode, setViewMode] = useState<ViewMode>('flights')
+  const [selectedFlight, setSelectedFlight] = useState<BackendFlightSummary | null>(null)
+  const [selectedFlightData, setSelectedFlightData] = useState<DJIFlightData | null>(null)
+  const [loadingDetail, setLoadingDetail] = useState(false)
   const [selectedBattery, setSelectedBattery] = useState<Battery | null>(null)
-  const [apiKey, setApiKey] = useState<string>('')
-  const [showApiKey, setShowApiKey] = useState(false)
+  const [compareIds, setCompareIds] = useState<string[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
 
-  // Load backend flights on startup
-  useEffect(() => {
-    fetch('/api/flights')
-      .then(r => r.json())
-      .then(data => setBackendFlights(data))
-      .catch(() => {})
+  const fetchFlights = useCallback(async (query?: string) => {
+    const url = query ? `/api/flights/search?free_text=${encodeURIComponent(query)}` : '/api/flights'
+    try {
+      const res = await fetch(url)
+      if (res.ok) setFlights(await res.json())
+    } catch {
+      // local backend not running — leave the current list as-is
+    }
   }, [])
 
+  useEffect(() => { fetchFlights() }, [fetchFlights])
+
+  const handleSearch = useCallback((query: string) => {
+    setSearchQuery(query)
+    fetchFlights(query || undefined)
+  }, [fetchFlights])
+
   const handleFilesUpload = useCallback(async (files: FileList) => {
-    const newRecords: FlightRecord[] = []
-    for (const file of Array.from(files)) {
-      const result = await parseDJILog(file, apiKey || undefined)
-      const flightId = `${file.name}-${Date.now()}`
-      const newRecord: FlightRecord = {
-        id: flightId,
-        file,
-        data: {
-          header: result.header,
-          telemetry: result.telemetry,
-          statistics: result.statistics,
-        },
-        loadedAt: new Date(),
+    const items = Array.from(files).map(file => ({
+      file,
+      tempId: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    }))
+    setPending(prev => [...prev, ...items.map(i => ({ tempId: i.tempId, filename: i.file.name, status: 'uploading' as const }))])
+
+    for (const { file, tempId } of items) {
+      try {
+        const formData = new FormData()
+        formData.append('file', file)
+        const res = await fetch('/api/upload', { method: 'POST', body: formData })
+        if (!res.ok) throw new Error('Upload failed')
+        setPending(prev => prev.filter(p => p.tempId !== tempId))
+        await fetchFlights(searchQuery || undefined)
+      } catch {
+        setPending(prev => prev.map(p => p.tempId === tempId
+          ? { ...p, status: 'error' as const, error: 'Upload failed — is the local backend running on :8000?' }
+          : p))
       }
-      newRecords.push(newRecord)
-      setFlights(prev => [...prev, newRecord])
-
-      // Also upload to backend for persistence
-      const formData = new FormData()
-      formData.append('file', file)
-      fetch('/api/upload', { method: 'POST', body: formData })
-        .then(r => r.json())
-        .then(backendFlight => {
-          if (backendFlight.id) {
-            setBackendFlights(prev => [backendFlight, ...prev])
-          }
-        })
-        .catch(() => {})
     }
-  }, [apiKey])
+  }, [fetchFlights, searchQuery])
 
-  const handleSelectFlight = (flight: FlightRecord) => {
+  const handleSelectFlight = useCallback(async (flight: BackendFlightSummary) => {
     setSelectedFlight(flight)
     setViewMode('flight-detail')
-  }
-
-  const handleSelectBackendFlight = (flight: BackendFlight) => {
-    setSelectedBackendFlight(flight)
-    setViewMode('flight-detail')
-  }
+    setSelectedFlightData(null)
+    setLoadingDetail(true)
+    try {
+      const res = await fetch(`/api/flights/${flight.id}`)
+      if (res.ok) {
+        const detail: BackendFlightDetail = await res.json()
+        setSelectedFlightData(backendDetailToFlightData(detail))
+      }
+    } finally {
+      setLoadingDetail(false)
+    }
+  }, [])
 
   const handleBackToList = () => {
     setViewMode('flights')
     setSelectedFlight(null)
-    setSelectedBackendFlight(null)
+    setSelectedFlightData(null)
   }
 
-  const handleRemoveFlight = (id: string) => {
-    setFlights(prev => prev.filter(f => f.id !== id))
-    setBackendFlights(prev => prev.filter(f => f.id !== id))
-    if (selectedFlight?.id === id || selectedBackendFlight?.id === id) {
-      setSelectedFlight(null)
-      setSelectedBackendFlight(null)
-      setViewMode('flights')
+  const handleRemoveFlight = useCallback(async (id: string) => {
+    try {
+      await fetch(`/api/flights/${id}`, { method: 'DELETE' })
+    } finally {
+      setFlights(prev => prev.filter(f => f.id !== id))
+      setCompareIds(prev => prev.filter(fid => fid !== id))
+      if (selectedFlight?.id === id) handleBackToList()
     }
+  }, [selectedFlight])
+
+  const handleTagsUpdated = (flightId: string, tags: string) => {
+    setFlights(prev => prev.map(f => f.id === flightId ? { ...f, tags } : f))
+    setSelectedFlight(prev => prev && prev.id === flightId ? { ...prev, tags } : prev)
+  }
+
+  const toggleCompare = (id: string) => {
+    setCompareIds(prev => {
+      if (prev.includes(id)) return prev.filter(fid => fid !== id)
+      if (prev.length >= 4) return prev // backend caps comparison at 4 flights
+      return [...prev, id]
+    })
   }
 
   const handleBatteryClick = (battery: Battery) => {
@@ -123,11 +120,8 @@ function App() {
     setSelectedBattery(null)
   }
 
-  const getCurrentFlight = () => selectedFlight || selectedBackendFlight
-
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -144,62 +138,54 @@ function App() {
               </div>
             </div>
 
-            {/* Navigation Tabs */}
-            <nav className="flex items-center gap-1 bg-gray-100 rounded-lg p-1 mr-4">
+            <nav className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+              {(['flights', 'batteries', 'aircraft'] as const).map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => { setViewMode(tab); setSelectedBattery(null) }}
+                  className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors capitalize ${
+                    viewMode === tab || (tab === 'batteries' && viewMode === 'battery-detail')
+                      ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
               <button
-                onClick={() => setViewMode('flights')}
+                onClick={() => compareIds.length >= 2 && setViewMode('compare')}
+                disabled={compareIds.length < 2}
                 className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  viewMode === 'flights' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-900'
-                }`}
+                  viewMode === 'compare' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                } ${compareIds.length < 2 ? 'opacity-40 cursor-not-allowed' : ''}`}
+                title={compareIds.length < 2 ? 'Select 2-4 flights in the Flights tab to compare' : ''}
               >
-                Flights
-              </button>
-              <button
-                onClick={() => { setViewMode('batteries'); setSelectedBattery(null); }}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                  viewMode === 'batteries' || viewMode === 'battery-detail' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                Batteries
+                Compare{compareIds.length > 0 ? ` (${compareIds.length})` : ''}
               </button>
             </nav>
-
-            <div className="flex items-center gap-4">
-              <button
-                onClick={() => setShowApiKey(!showApiKey)}
-                className="text-sm text-blue-600 hover:text-blue-800 font-medium"
-              >
-                {showApiKey ? 'Hide' : 'Set'} DJI API Key
-              </button>
-              {showApiKey && (
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
-                  placeholder="Enter DJI API key (optional)"
-                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
-                />
-              )}
-            </div>
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Flights List View */}
         {viewMode === 'flights' && (
           <FlightList
-            flights={[
-              ...flights.map(f => ({ ...f, isLocal: true })),
-              ...backendFlights.map(f => ({ ...f, isLocal: false }))
-            ]}
-            onSelect={f => f.isLocal ? handleSelectFlight(f) : handleSelectBackendFlight(f)}
+            flights={flights}
+            pending={pending}
+            onSelect={handleSelectFlight}
             onRemove={handleRemoveFlight}
             onUpload={handleFilesUpload}
+            onSearch={handleSearch}
+            selectedForCompare={compareIds}
+            onToggleCompare={toggleCompare}
           />
         )}
 
-        {/* Battery List View */}
+        {viewMode === 'aircraft' && <AircraftView />}
+
+        {viewMode === 'compare' && (
+          <CompareView flightIds={compareIds} onClose={() => setViewMode('flights')} />
+        )}
+
         {viewMode === 'batteries' && (
           <div className="space-y-6">
             <div className="flex items-center justify-between">
@@ -209,53 +195,40 @@ function App() {
           </div>
         )}
 
-        {/* Battery Detail View */}
         {viewMode === 'battery-detail' && selectedBattery && (
-          <div className="space-y-6">
-            <button
-              onClick={handleBackToBatteries}
-              className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-              Back to batteries
-            </button>
-            <BatteryDetail
-              battery={selectedBattery}
-              health={{ status: 'green', degradation_pct: 0, avg_discharge_rate: 0, discharge_rates: [], avg_voltage_sag: 0, early_avg_rate: 0, recent_avg_rate: 0, flight_count: 0 }}
-              flights={[]}
-              onClose={handleBackToBatteries}
-            />
-          </div>
+          <BatteryDetail battery={selectedBattery} onClose={handleBackToBatteries} />
         )}
 
-        {/* Flight Detail View */}
-        {(viewMode === 'flight-detail') && getCurrentFlight() && (
+        {viewMode === 'flight-detail' && selectedFlight && (
           <div className="space-y-6">
-            <button
-              onClick={handleBackToList}
-              className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1"
-            >
+            <button onClick={handleBackToList} className="text-sm text-gray-600 hover:text-gray-900 flex items-center gap-1">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
               </svg>
               Back to flights
             </button>
 
-            <FlightDetail flight={getCurrentFlight()!} />
-            
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 space-y-6">
-                <MapView telemetry={getCurrentFlight()!.data.telemetry} />
-                <ChartsPanel telemetry={getCurrentFlight()!.data.telemetry} />
+            <FlightDetail header={selectedFlight} onTagsUpdated={handleTagsUpdated} />
+
+            {loadingDetail ? (
+              <div className="text-center py-12">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+                <p className="mt-2 text-gray-500">Loading telemetry...</p>
               </div>
-              <div className="space-y-6">
-                <StatsPanel header={getCurrentFlight()!.data.header} statistics={getCurrentFlight()!.data.statistics} />
-                <BatteryView telemetry={getCurrentFlight()!.data.telemetry} statistics={getCurrentFlight()!.data.statistics} />
-                <ExportPanel flightData={getCurrentFlight()!.data} />
+            ) : selectedFlightData && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 space-y-6">
+                  <FlightMapSection telemetry={selectedFlightData.telemetry} />
+                  <ChartsPanel telemetry={selectedFlightData.telemetry} />
+                </div>
+                <div className="space-y-6">
+                  <StatsPanel header={selectedFlightData.header} statistics={selectedFlightData.statistics} />
+                  <FlightInsights telemetry={selectedFlightData.telemetry} statistics={selectedFlightData.statistics} />
+                  <BatteryView telemetry={selectedFlightData.telemetry} statistics={selectedFlightData.statistics} />
+                  <ExportPanel flightData={selectedFlightData} />
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </main>

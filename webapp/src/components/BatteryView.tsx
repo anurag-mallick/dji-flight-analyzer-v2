@@ -18,7 +18,6 @@ export function BatteryView({ telemetry, statistics }: BatteryViewProps) {
         time: i,
         battery: p.batteryPercent,
         voltage: p.cellVoltage,
-        current: p.current || 0,
       }))
   }, [telemetry, hasData])
 

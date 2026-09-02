@@ -348,3 +348,105 @@ export function formatAltitude(meters: number): string {
 export function formatBattery(percent: number): string {
   return `${percent.toFixed(1)}%`;
 }
+
+/**
+ * Shapes returned by the local FastAPI backend (local-app/app.py).
+ * Field names are snake_case to match the JSON the API actually sends.
+ */
+export interface BackendFlightSummary {
+  id: string;
+  filename: string;
+  aircraft: string;
+  format: string;
+  flight_duration: number;
+  max_altitude: number;
+  max_distance: number;
+  max_speed: number;
+  battery_start: number;
+  battery_end: number;
+  has_full_telemetry: boolean;
+  gps_point_count: number;
+  upload_date: string | null;
+  tags: string | null;
+  battery_id: string;
+  aircraft_id: string;
+}
+
+export interface BackendTelemetryPoint {
+  timestamp: number;
+  latitude: number;
+  longitude: number;
+  altitude: number;
+  horizontal_speed: number;
+  vertical_speed: number;
+  battery_percent: number;
+  cell_voltage: number;
+  gps_sats: number;
+  gimbal_pitch: number;
+  gimbal_roll: number;
+  gimbal_yaw: number;
+  rc_signal: number;
+  temperature: number;
+  phase: string;
+}
+
+export interface BackendFlightDetail {
+  id: string;
+  header: BackendFlightSummary;
+  telemetry: BackendTelemetryPoint[];
+  statistics: Record<string, number | Record<string, number>>;
+}
+
+/**
+ * Convert a full flight detail response from the local backend into the
+ * same DJIFlightData shape the client-side parser produces, so downstream
+ * view components (MapView, ChartsPanel, StatsPanel, BatteryView, ExportPanel)
+ * work identically regardless of where the data came from.
+ */
+export function backendDetailToFlightData(detail: BackendFlightDetail): DJIFlightData {
+  const h = detail.header;
+  const telemetry: DJITelemetryPoint[] = detail.telemetry.map(p => ({
+    timestamp: p.timestamp,
+    latitude: p.latitude,
+    longitude: p.longitude,
+    altitude: p.altitude,
+    horizontalSpeed: p.horizontal_speed,
+    verticalSpeed: p.vertical_speed,
+    batteryPercent: p.battery_percent,
+    cellVoltage: p.cell_voltage,
+    gpsSats: p.gps_sats,
+    gimbalPitch: p.gimbal_pitch,
+    gimbalRoll: p.gimbal_roll,
+    gimbalYaw: p.gimbal_yaw,
+    rcSignalStrength: p.rc_signal,
+    temperature: p.temperature,
+    phase: (p.phase as DJITelemetryPoint['phase']) || 'unknown',
+  }));
+
+  const header: DJILogHeader = {
+    format: (h.format as DJILogHeader['format']) || 'unknown',
+    aircraft: h.aircraft,
+    serialNumber: h.aircraft_id ? h.aircraft_id.replace(/^ac_/, '') : 'Unknown',
+    appVersion: 'Unknown',
+    platform: 'unknown',
+    flightStartTime: h.upload_date || new Date().toISOString(),
+    flightDuration: h.flight_duration,
+    takeoffLatitude: telemetry[0]?.latitude ?? 0,
+    takeoffLongitude: telemetry[0]?.longitude ?? 0,
+    takeoffAltitude: telemetry[0]?.altitude ?? 0,
+    maxAltitude: h.max_altitude,
+    maxDistance: h.max_distance,
+    maxSpeed: h.max_speed,
+    batteryStartPercent: h.battery_start,
+    batteryEndPercent: h.battery_end,
+    captureCount: 0,
+    videoTime: 0,
+    fileSize: 0,
+    hasFullTelemetry: h.has_full_telemetry,
+    apiKeyRequired: false,
+  };
+
+  const statistics = telemetry.length > 0 ? calculateStatistics(telemetry) : emptyStatistics();
+
+  return { header, telemetry, statistics };
+}

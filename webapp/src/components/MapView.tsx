@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup, useMap } from 'react-leaflet'
+import React from 'react'
+import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
 import { DJITelemetryPoint } from '../lib/djiParser'
@@ -15,57 +15,29 @@ const DefaultIcon = L.icon({
   shadowSize: [41, 41],
 })
 
-// Playback scrubber component
-function PlaybackScrubber({ telemetry, currentIndex, onSeek }: { 
-  telemetry: DJITelemetryPoint[]
+interface MapViewProps {
+  validPoints: DJITelemetryPoint[]
   currentIndex: number
-  onSeek: (index: number) => void
-}) {
-  if (telemetry.length === 0) return null
-
-  const current = telemetry[currentIndex]
-  const progress = telemetry.length > 1 ? (currentIndex / (telemetry.length - 1)) * 100 : 0
-
-  return (
-    <div className="bg-white rounded-lg border border-gray-200 p-4 mt-4">
-      <div className="flex items-center gap-3 mb-2">
-        <button onClick={() => onSeek(0)} className="p-2 text-gray-500 hover:text-gray-700" title="Start">
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6V18z"/></svg>
-        </button>
-        <button onClick={() => onSeek(Math.max(0, currentIndex - 1))} className="p-2 text-gray-500 hover:text-gray-700" title="Step back">
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M11 18l-6-6 6-6v12zm8 0l-6-6 6-6v12z"/></svg>
-        </button>
-        <button onClick={() => onSeek(Math.min(telemetry.length - 1, currentIndex + 1))} className="p-2 text-gray-500 hover:text-gray-700" title="Step forward">
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M13 18l6-6-6-6v12zm-8 0l6-6-6-6v12z"/></svg>
-        </button>
-        <button onClick={() => onSeek(telemetry.length - 1)} className="p-2 text-gray-500 hover:text-gray-700" title="End">
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 6v12l8.5-6L12 6z"/></svg>
-        </button>
-        <div className="flex-1 h-2 bg-gray-200 rounded-full cursor-pointer relative" onClick={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect()
-          const percent = (e.clientX - rect.left) / rect.width
-          onSeek(Math.round(percent * (telemetry.length - 1)))
-        }}>
-          <div className="h-full bg-blue-600 rounded-full transition-all duration-100" style={{ width: `${progress}%` }} />
-          <div className="absolute top-1/2 w-3 h-3 bg-white border-2 border-blue-600 rounded-full -translate-x-1/2 -translate-y-1/2 shadow-md" style={{ left: `${progress}%` }} />
-        </div>
-      </div>
-      <div className="grid grid-cols-4 gap-2 text-xs text-gray-600">
-        <div>Alt: {current?.altitude?.toFixed(1) ?? '—'} m</div>
-        <div>Speed: {current?.horizontalSpeed?.toFixed(1) ?? '—'} m/s</div>
-        <div>Bat: {current?.batteryPercent?.toFixed(0) ?? '—'}%</div>
-        <div>Sats: {current?.gpsSats ?? '—'}</div>
-      </div>
-    </div>
-  )
+  mapStyle: string
+  onMapStyleChange: (style: string) => void
 }
 
-export function MapView({ telemetry }: { telemetry: DJITelemetryPoint[] }) {
-  const [currentIndex, setCurrentIndex] = useState(0)
-  const [mapStyle, setMapStyle] = useState('osm')
+// Google's tile servers are not a documented public API, and using them outside
+// Google Maps Platform's own JS/Tile API is against Google's terms of service for
+// anything beyond casual personal use. They are offered here only as an opt-in
+// convenience for a local hobbyist tool; for production use, switch to the
+// official Google Maps Platform Tile API with a billed API key.
+const TILE_LAYERS: Record<string, string> = {
+  osm: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  terrain: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+  googleRoadmap: 'https://mt{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
+  googleSatellite: 'https://mt{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+  googleHybrid: 'https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+}
+const GOOGLE_SUBDOMAINS = ['0', '1', '2', '3']
 
-  const validPoints = telemetry.filter(p => p.latitude !== 0 && p.longitude !== 0)
-  
+export function MapView({ validPoints, currentIndex, mapStyle, onMapStyleChange }: MapViewProps) {
   if (validPoints.length === 0) {
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
@@ -78,33 +50,31 @@ export function MapView({ telemetry }: { telemetry: DJITelemetryPoint[] }) {
     )
   }
 
-  // Calculate bounds
   const lats = validPoints.map(p => p.latitude)
   const lngs = validPoints.map(p => p.longitude)
   const minLat = Math.min(...lats), maxLat = Math.max(...lats)
   const minLng = Math.min(...lngs), maxLng = Math.max(...lngs)
   const centerLat = (minLat + maxLat) / 2
   const centerLng = (minLng + maxLng) / 2
-
-  const tileLayers = {
-    osm: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    satellite: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    terrain: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
-  }
+  const isGoogle = mapStyle.startsWith('google')
+  const safeIndex = Math.min(currentIndex, validPoints.length - 1)
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
       <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex items-center justify-between">
-        <h3 className="text-lg font-semibold text-gray-900">Flight Path</h3>
+        <h3 className="text-lg font-semibold text-gray-900">Flight Path (2D)</h3>
         <div className="flex items-center gap-2">
           <select
             value={mapStyle}
-            onChange={e => setMapStyle(e.target.value)}
+            onChange={e => onMapStyleChange(e.target.value)}
             className="text-sm border border-gray-300 rounded px-2 py-1"
           >
             <option value="osm">OpenStreetMap</option>
-            <option value="satellite">Satellite</option>
+            <option value="satellite">Satellite (Esri)</option>
             <option value="terrain">Terrain</option>
+            <option value="googleRoadmap">Google Roadmap</option>
+            <option value="googleSatellite">Google Satellite</option>
+            <option value="googleHybrid">Google Hybrid</option>
           </select>
           <span className="text-sm text-gray-500">{validPoints.length} points</span>
         </div>
@@ -118,10 +88,14 @@ export function MapView({ telemetry }: { telemetry: DJITelemetryPoint[] }) {
           scrollWheelZoom={true}
         >
           <TileLayer
-            url={tileLayers[mapStyle]}
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            key={mapStyle}
+            url={TILE_LAYERS[mapStyle]}
+            subdomains={isGoogle ? GOOGLE_SUBDOMAINS : undefined}
+            attribution={isGoogle
+              ? '&copy; Google'
+              : '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}
           />
-          
+
           <Polyline
             positions={validPoints.map(p => [p.latitude, p.longitude])}
             color="#3b82f6"
@@ -130,43 +104,33 @@ export function MapView({ telemetry }: { telemetry: DJITelemetryPoint[] }) {
             lineCap="round"
             lineJoin="round"
           />
-          
-          {validPoints.length > 0 && (
-            <>
-              <Marker position={[validPoints[0].latitude, validPoints[0].longitude]} icon={DefaultIcon}>
-                <Popup>Takeoff</Popup>
-              </Marker>
-              <Marker position={[validPoints[validPoints.length - 1].latitude, validPoints[validPoints.length - 1].longitude]} icon={DefaultIcon}>
-                <Popup>Landing</Popup>
-              </Marker>
-              
-              <CircleMarker
-                center={[validPoints[currentIndex].latitude, validPoints[currentIndex].longitude]}
-                radius={8}
-                color="#3b82f6"
-                fillColor="#3b82f6"
-                fillOpacity={1}
-                weight={3}
-              >
-                <Popup>
-                  <div>
-                    <p>Point {currentIndex + 1} / {validPoints.length}</p>
-                    <p>Alt: {validPoints[currentIndex].altitude.toFixed(1)} m</p>
-                    <p>Speed: {validPoints[currentIndex].horizontalSpeed.toFixed(1)} m/s</p>
-                    <p>Battery: {validPoints[currentIndex].batteryPercent.toFixed(0)}%</p>
-                  </div>
-                </Popup>
-              </CircleMarker>
-            </>
-          )}
+
+          <Marker position={[validPoints[0].latitude, validPoints[0].longitude]} icon={DefaultIcon}>
+            <Popup>Takeoff</Popup>
+          </Marker>
+          <Marker position={[validPoints[validPoints.length - 1].latitude, validPoints[validPoints.length - 1].longitude]} icon={DefaultIcon}>
+            <Popup>Landing</Popup>
+          </Marker>
+
+          <CircleMarker
+            center={[validPoints[safeIndex].latitude, validPoints[safeIndex].longitude]}
+            radius={8}
+            color="#3b82f6"
+            fillColor="#3b82f6"
+            fillOpacity={1}
+            weight={3}
+          >
+            <Popup>
+              <div>
+                <p>Point {safeIndex + 1} / {validPoints.length}</p>
+                <p>Alt: {validPoints[safeIndex].altitude.toFixed(1)} m</p>
+                <p>Speed: {validPoints[safeIndex].horizontalSpeed.toFixed(1)} m/s</p>
+                <p>Battery: {validPoints[safeIndex].batteryPercent.toFixed(0)}%</p>
+              </div>
+            </Popup>
+          </CircleMarker>
         </MapContainer>
       </div>
-
-      <PlaybackScrubber 
-        telemetry={validPoints} 
-        currentIndex={currentIndex} 
-        onSeek={setCurrentIndex} 
-      />
     </div>
   )
 }

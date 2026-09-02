@@ -65,7 +65,7 @@ export function BatteryDetail({ battery, onClose }: BatteryDetailProps) {
   const [health, setHealth] = useState<BatteryHealth | null>(null)
   const [flights, setFlights] = useState<FlightSummary[]>([])
   const [loading, setLoading] = useState(true)
-  const [capacity, setCapacity] = useState(battery.capacity_mah || '')
+  const [capacity, setCapacity] = useState(battery.capacity_mah ? String(battery.capacity_mah) : '')
   const [notes, setNotes] = useState(battery.notes || '')
 
   useEffect(() => {
@@ -398,4 +398,4 @@ export function BatteryList({ onSelectBattery }: BatteryListProps) {
   )
 }
 
-export { Battery, BatteryHealth, FlightSummary }
+export type { Battery, BatteryHealth, FlightSummary }

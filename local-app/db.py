@@ -284,7 +284,7 @@ def get_aircraft(aircraft_id: str) -> Optional[Dict[str, Any]]:
     for fid in aircraft.get("flight_ids", []):
         f = get_flight(fid)
         if f:
-            total_seconds += f.get("duration", 0)
+            total_seconds += f.get("flight_duration", 0)
     aircraft = dict(aircraft)
     aircraft["total_flight_hours"] = round(total_seconds / 3600, 2)
     aircraft["flight_count"] = len(aircraft.get("flight_ids", []))
