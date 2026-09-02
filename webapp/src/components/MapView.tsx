@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from 'react'
 import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
-import 'leaflet.heat'
 import { DJITelemetryPoint } from '../lib/djiParser'
 
 // Fix Leaflet default icon issue
