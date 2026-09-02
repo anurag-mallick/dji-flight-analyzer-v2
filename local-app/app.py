@@ -7,7 +7,7 @@ import json
 import csv
 import io
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 
 try:
@@ -17,6 +17,17 @@ except ImportError:
     PYDJIRECORD_AVAILABLE = False
     DJIRecord = None
 
+from db import (
+    save_flight, get_flight, list_flights, delete_flight,
+    get_flight_telemetry,
+    get_or_create_battery, get_battery, list_batteries, update_battery,
+    get_battery_flights, get_battery_health_stats,
+    link_flight_to_battery, link_flight_to_aircraft,
+    get_or_create_aircraft, get_aircraft, list_aircraft, update_aircraft,
+    add_maintenance_log, get_maintenance_logs,
+    update_flight_tags, search_flights, get_flights_for_comparison,
+)
+
 app = FastAPI(
     title="DJI Flight Analyzer API",
     description="Local backend for full DJI telemetry decryption using pydjirecord",
@@ -24,7 +35,6 @@ app = FastAPI(
     docs_url="/docs",
 )
 
-# CORS for local development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
@@ -33,12 +43,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# DJI API key from environment
 DJI_API_KEY = os.getenv("DJI_API_KEY", "")
-
-# In-memory storage (could be SQLite for persistence)
-flights_db: dict = {}
-flight_counter = 0
 
 
 class FlightHeader(BaseModel):
@@ -77,8 +82,37 @@ class FlightTelemetry(BaseModel):
 class FlightDetail(BaseModel):
     id: str
     header: FlightHeader
-    telemetry: list[FlightTelemetry]
+    telemetry: List[FlightTelemetry]
     statistics: dict
+
+
+class BatteryHealth(BaseModel):
+    flight_count: int
+    avg_discharge_rate: float
+    discharge_rates: List[float]
+    avg_voltage_sag: float
+    degradation_pct: float
+    early_avg_rate: float
+    recent_avg_rate: float
+    status: str
+
+
+class AircraftInfo(BaseModel):
+    id: str
+    nickname: Optional[str]
+    model: Optional[str]
+    serial_number: Optional[str]
+    total_flight_hours: float
+    service_interval_hours: int
+    notes: Optional[str]
+    flight_count: int
+
+
+class MaintenanceLog(BaseModel):
+    id: int
+    aircraft_id: str
+    service_date: str
+    note: str
 
 
 @app.get("/")
@@ -103,19 +137,24 @@ async def health():
 @app.post("/api/upload", response_model=FlightHeader)
 async def upload_flight(file: UploadFile = File(...)):
     """Upload and parse a DJI flight log file."""
-    global flight_counter
-
     if not file.filename or not file.filename.endswith(".txt"):
         raise HTTPException(status_code=400, detail="Only .txt flight log files are supported")
 
     content = await file.read()
     text_content = content.decode("utf-8", errors="replace")
 
+    # Extract serial numbers from raw text if present (v12/v13)
+    aircraft_serial = None
+    battery_serial = None
+    for line in text_content.split('\n'):
+        line = line.strip()
+        if line.startswith('aircraftSerialNumber:') or line.startswith('serialNumber:'):
+            aircraft_serial = line.split(':', 1)[1].strip()
+        elif line.startswith('batterySerialNumber:'):
+            battery_serial = line.split(':', 1)[1].strip()
+
     if not PYDJIRECORD_AVAILABLE:
-        # Fallback: header-only parsing
-        flight_counter += 1
-        flight_id = f"flight_{flight_counter}"
-        
+        flight_id = f"flight_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         header = FlightHeader(
             id=flight_id,
             filename=file.filename,
@@ -130,23 +169,32 @@ async def upload_flight(file: UploadFile = File(...)):
             has_full_telemetry=False,
             gps_point_count=0,
         )
-        
-        flights_db[flight_id] = {
-            "header": header,
+        flight_record = {
+            "id": flight_id,
+            "filename": file.filename,
+            "aircraft": header.aircraft,
+            "format": header.format,
+            "upload_date": datetime.now().isoformat(),
+            "flight_start_time": None,
+            "duration": header.flight_duration,
+            "max_altitude": header.max_altitude,
+            "max_distance": header.max_distance,
+            "max_speed": header.max_speed,
+            "battery_start": header.battery_start,
+            "battery_end": header.battery_end,
+            "gps_point_count": header.gps_point_count,
+            "has_full_telemetry": header.has_full_telemetry,
             "telemetry": [],
-            "raw": text_content,
+            "tags": None,
+            "battery_id": "",
+            "aircraft_id": "",
         }
-        
+        save_flight(flight_record)
         return header
 
     try:
-        # Parse with pydjirecord using API key
         record = DJIRecord(text_content, DJI_API_KEY)
         
-        flight_counter += 1
-        flight_id = f"flight_{flight_counter}"
-        
-        # Extract telemetry points
         telemetry_points = []
         for p in record.gps_points:
             telemetry_points.append(FlightTelemetry(
@@ -167,6 +215,8 @@ async def upload_flight(file: UploadFile = File(...)):
                 phase=detect_flight_phase(p),
             ))
         
+        flight_id = f"flight_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
         header = FlightHeader(
             id=flight_id,
             filename=file.filename,
@@ -182,19 +232,46 @@ async def upload_flight(file: UploadFile = File(...)):
             gps_point_count=len(record.gps_points),
         )
         
-        flights_db[flight_id] = {
-            "header": header,
-            "telemetry": telemetry_points,
-            "record": record,
+        # Link to battery/aircraft from DJI record if available
+        battery_id = ""
+        aircraft_id = ""
+        if hasattr(record, 'battery_serial') and record.battery_serial:
+            battery_id = get_or_create_battery(record.battery_serial)
+        if hasattr(record, 'aircraft_serial') and record.aircraft_serial:
+            aircraft_id = get_or_create_aircraft(record.aircraft_serial, record.aircraft_type)
+        
+        flight_record = {
+            "id": flight_id,
+            "filename": file.filename,
+            "aircraft": header.aircraft,
+            "format": header.format,
+            "upload_date": datetime.now().isoformat(),
+            "flight_start_time": record.flight_start_time,
+            "duration": record.flight_duration,
+            "max_altitude": record.max_altitude,
+            "max_distance": record.max_distance,
+            "max_speed": record.max_speed,
+            "battery_start": record.battery_start_percent,
+            "battery_end": record.battery_end_percent,
+            "gps_point_count": len(record.gps_points),
+            "has_full_telemetry": True,
+            "telemetry": [t.model_dump() for t in telemetry_points],
+            "tags": None,
+            "battery_id": battery_id,
+            "aircraft_id": aircraft_id,
         }
+        save_flight(flight_record)
+        
+        # Link flight to battery/aircraft records
+        if battery_id:
+            link_flight_to_battery(battery_id, flight_id)
+        if aircraft_id:
+            link_flight_to_aircraft(aircraft_id, flight_id)
         
         return header
 
     except Exception as e:
-        # Fallback for unparseable logs
-        flight_counter += 1
-        flight_id = f"flight_{flight_counter}"
-        
+        flight_id = f"flight_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         header = FlightHeader(
             id=flight_id,
             filename=file.filename,
@@ -209,19 +286,31 @@ async def upload_flight(file: UploadFile = File(...)):
             has_full_telemetry=False,
             gps_point_count=0,
         )
-        
-        flights_db[flight_id] = {
-            "header": header,
+        flight_record = {
+            "id": flight_id,
+            "filename": file.filename,
+            "aircraft": header.aircraft,
+            "format": header.format,
+            "upload_date": datetime.now().isoformat(),
+            "flight_start_time": None,
+            "duration": header.flight_duration,
+            "max_altitude": header.max_altitude,
+            "max_distance": header.max_distance,
+            "max_speed": header.max_speed,
+            "battery_start": header.battery_start,
+            "battery_end": header.battery_end,
+            "gps_point_count": header.gps_point_count,
+            "has_full_telemetry": header.has_full_telemetry,
             "telemetry": [],
-            "raw": text_content,
-            "error": str(e),
+            "tags": None,
+            "battery_id": get_or_create_battery(battery_serial) if battery_serial else "",
+            "aircraft_id": get_or_create_aircraft(aircraft_serial, header.aircraft) if aircraft_serial else "",
         }
-        
+        save_flight(flight_record)
         return header
 
 
 def detect_flight_phase(point) -> str:
-    """Simple flight phase detection."""
     alt = getattr(point, 'altitude', 0)
     v_speed = getattr(point, 'vertical_speed', 0)
     h_speed = getattr(point, 'horizontal_speed', 0)
@@ -239,50 +328,97 @@ def detect_flight_phase(point) -> str:
     return "cruise"
 
 
-@app.get("/api/flights", response_model=list[FlightHeader])
-async def list_flights():
-    """List all uploaded flights."""
+@app.get("/api/flights", response_model=List[FlightHeader])
+async def list_flights_endpoint():
+    flights = list_flights()
     return [
-        {
-            "id": fid,
-            "filename": fdata["header"].filename,
-            "aircraft": fdata["header"].aircraft,
-            "format": fdata["header"].format,
-            "flight_duration": fdata["header"].flight_duration,
-            "max_altitude": fdata["header"].max_altitude,
-            "max_distance": fdata["header"].max_distance,
-            "max_speed": fdata["header"].max_speed,
-            "battery_start": fdata["header"].battery_start,
-            "battery_end": fdata["header"].battery_end,
-            "has_full_telemetry": fdata["header"].has_full_telemetry,
-            "gps_point_count": fdata["header"].gps_point_count,
-        }
-        for fid, fdata in flights_db.items()
+        FlightHeader(
+            id=f["id"],
+            filename=f["filename"],
+            aircraft=f["aircraft"] or "Unknown",
+            format=f["format"] or "unknown",
+            flight_duration=f["flight_duration"],
+            max_altitude=f["max_altitude"],
+            max_distance=f["max_distance"],
+            max_speed=f["max_speed"],
+            battery_start=f["battery_start"],
+            battery_end=f["battery_end"],
+            has_full_telemetry=f["has_full_telemetry"],
+            gps_point_count=f["gps_point_count"],
+        )
+        for f in flights
+    ]
+
+
+@app.get("/api/flights/search", response_model=List[FlightHeader])
+async def search_flights_endpoint(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    aircraft_id: Optional[str] = None,
+    battery_id: Optional[str] = None,
+    tags: Optional[str] = None,
+    free_text: Optional[str] = None,
+):
+    flights = search_flights(
+        date_from=date_from,
+        date_to=date_to,
+        aircraft_id=aircraft_id,
+        battery_id=battery_id,
+        tags=tags,
+        free_text=free_text,
+    )
+    return [
+        FlightHeader(
+            id=f["id"],
+            filename=f["filename"],
+            aircraft=f["aircraft"] or "Unknown",
+            format=f["format"] or "unknown",
+            flight_duration=f["flight_duration"],
+            max_altitude=f["max_altitude"],
+            max_distance=f["max_distance"],
+            max_speed=f["max_speed"],
+            battery_start=f["battery_start"],
+            battery_end=f["battery_end"],
+            has_full_telemetry=f["has_full_telemetry"],
+            gps_point_count=f["gps_point_count"],
+        )
+        for f in flights
     ]
 
 
 @app.get("/api/flights/{flight_id}", response_model=FlightDetail)
-async def get_flight(flight_id: str):
-    """Get detailed flight data including telemetry."""
-    if flight_id not in flights_db:
+async def get_flight_endpoint(flight_id: str):
+    flight = get_flight(flight_id)
+    if not flight:
         raise HTTPException(status_code=404, detail="Flight not found")
     
-    fdata = flights_db[flight_id]
-    header = fdata["header"]
-    telemetry = fdata.get("telemetry", [])
-    
-    # Calculate statistics
+    telemetry = flight.get("telemetry", [])
     stats = calculate_statistics(telemetry)
     
-    return {
-        "id": flight_id,
-        "header": header,
-        "telemetry": telemetry,
-        "statistics": stats,
-    }
+    header = FlightHeader(
+        id=flight["id"],
+        filename=flight["filename"],
+        aircraft=flight["aircraft"] or "Unknown",
+        format=flight["format"] or "unknown",
+        flight_duration=flight["flight_duration"],
+        max_altitude=flight["max_altitude"],
+        max_distance=flight["max_distance"],
+        max_speed=flight["max_speed"],
+        battery_start=flight["battery_start"],
+        battery_end=flight["battery_end"],
+        has_full_telemetry=flight["has_full_telemetry"],
+        gps_point_count=flight["gps_point_count"],
+    )
+    
+    return FlightDetail(
+        id=flight["id"],
+        header=header,
+        telemetry=[FlightTelemetry(**t) for t in telemetry],
+        statistics=stats,
+    )
 
 
-def calculate_statistics(telemetry: list) -> dict:
+def calculate_statistics(telemetry: List) -> dict:
     if not telemetry:
         return {}
     
@@ -295,7 +431,6 @@ def calculate_statistics(telemetry: list) -> dict:
     rc_signals = [p.rc_signal for p in telemetry]
     temps = [p.temperature for p in telemetry]
     
-    # Flight phase duration
     phase_counts = {}
     for p in telemetry:
         phase_counts[p.phase] = phase_counts.get(p.phase, 0) + 1
@@ -338,15 +473,15 @@ def haversine(lat1, lon1, lat2, lon2):
     return 2 * R * atan2(sqrt(a), sqrt(1-a))
 
 
-# Export endpoints
+# ============ EXPORT ENDPOINTS ============
+
 @app.get("/api/export/csv/{flight_id}")
 async def export_csv(flight_id: str):
-    if flight_id not in flights_db:
+    flight = get_flight(flight_id)
+    if not flight:
         raise HTTPException(status_code=404, detail="Flight not found")
     
-    fdata = flights_db[flight_id]
-    telemetry = fdata.get("telemetry", [])
-    
+    telemetry = flight.get("telemetry", [])
     if not telemetry:
         raise HTTPException(status_code=400, detail="No telemetry data")
     
@@ -360,10 +495,10 @@ async def export_csv(flight_id: str):
     ])
     for p in telemetry:
         writer.writerow([
-            p.timestamp, p.latitude, p.longitude, p.altitude,
-            p.horizontal_speed, p.vertical_speed, p.battery_percent,
-            p.cell_voltage, p.gps_sats, p.gimbal_pitch, p.gimbal_roll, p.gimbal_yaw,
-            p.rc_signal, p.temperature, p.phase
+            p["timestamp"], p["latitude"], p["longitude"], p["altitude"],
+            p["horizontal_speed"], p["vertical_speed"], p["battery_percent"],
+            p["cell_voltage"], p["gps_sats"], p["gimbal_pitch"], p["gimbal_roll"], p["gimbal_yaw"],
+            p["rc_signal"], p["temperature"], p["phase"]
         ])
     
     return JSONResponse(content={
@@ -376,16 +511,15 @@ async def export_csv(flight_id: str):
 
 @app.get("/api/export/kml/{flight_id}")
 async def export_kml(flight_id: str):
-    if flight_id not in flights_db:
+    flight = get_flight(flight_id)
+    if not flight:
         raise HTTPException(status_code=404, detail="Flight not found")
     
-    fdata = flights_db[flight_id]
-    telemetry = fdata.get("telemetry", [])
-    
+    telemetry = flight.get("telemetry", [])
     if not telemetry:
         raise HTTPException(status_code=400, detail="No telemetry data")
     
-    coords = " ".join(f"{p.longitude},{p.latitude},{p.altitude}" for p in telemetry)
+    coords = " ".join(f"{p['longitude']},{p['latitude']},{p['altitude']}" for p in telemetry)
     
     kml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
@@ -410,13 +544,11 @@ async def export_kml(flight_id: str):
 
 @app.get("/api/export/geojson/{flight_id}")
 async def export_geojson(flight_id: str):
-    if flight_id not in flights_db:
+    flight = get_flight(flight_id)
+    if not flight:
         raise HTTPException(status_code=404, detail="Flight not found")
     
-    fdata = flights_db[flight_id]
-    telemetry = fdata.get("telemetry", [])
-    header = fdata["header"]
-    
+    telemetry = flight.get("telemetry", [])
     if not telemetry:
         raise HTTPException(status_code=400, detail="No telemetry data")
     
@@ -426,15 +558,15 @@ async def export_geojson(flight_id: str):
             "type": "Feature",
             "geometry": {
                 "type": "LineString",
-                "coordinates": [[p.longitude, p.latitude, p.altitude] for p in telemetry],
+                "coordinates": [[p["longitude"], p["latitude"], p["altitude"]] for p in telemetry],
             },
             "properties": {
-                "aircraft": header.aircraft,
-                "max_altitude": header.max_altitude,
-                "max_speed": header.max_speed,
-                "flight_duration": header.flight_duration,
-                "battery_start": header.battery_start,
-                "battery_end": header.battery_end,
+                "aircraft": flight["aircraft"],
+                "max_altitude": flight["max_altitude"],
+                "max_speed": flight["max_speed"],
+                "flight_duration": flight["flight_duration"],
+                "battery_start": flight["battery_start"],
+                "battery_end": flight["battery_end"],
                 "gps_point_count": len(telemetry),
             },
         }],
@@ -446,6 +578,184 @@ async def export_geojson(flight_id: str):
         "format": "geojson",
         "point_count": len(telemetry),
     })
+
+
+# ============ BATTERY ENDPOINTS ============
+
+@app.get("/api/batteries")
+async def list_batteries_endpoint():
+    return list_batteries()
+
+
+@app.get("/api/batteries/{battery_id}")
+async def get_battery_endpoint(battery_id: str):
+    battery = get_battery(battery_id)
+    if not battery:
+        raise HTTPException(status_code=404, detail="Battery not found")
+    return battery
+
+
+@app.get("/api/batteries/{battery_id}/flights")
+async def get_battery_flights_endpoint(battery_id: str):
+    flights = get_battery_flights(battery_id)
+    return [
+        FlightHeader(
+            id=f["id"],
+            filename=f["filename"],
+            aircraft=f["aircraft"] or "Unknown",
+            format=f["format"] or "unknown",
+            flight_duration=f["flight_duration"],
+            max_altitude=f["max_altitude"],
+            max_distance=f["max_distance"],
+            max_speed=f["max_speed"],
+            battery_start=f["battery_start"],
+            battery_end=f["battery_end"],
+            has_full_telemetry=f["has_full_telemetry"],
+            gps_point_count=f["gps_point_count"],
+        )
+        for f in flights
+    ]
+
+
+@app.get("/api/batteries/{battery_id}/health")
+async def get_battery_health_endpoint(battery_id: str):
+    health = get_battery_health_stats(battery_id)
+    if health.get("status") == "no_data":
+        raise HTTPException(status_code=404, detail="No flight data for this battery")
+    return health
+
+
+# ============ AIRCRAFT ENDPOINTS ============
+
+@app.get("/api/aircraft")
+async def list_aircraft_endpoint():
+    return list_aircraft()
+
+
+@app.get("/api/aircraft/{aircraft_id}")
+async def get_aircraft_endpoint(aircraft_id: str):
+    aircraft = get_aircraft(aircraft_id)
+    if not aircraft:
+        raise HTTPException(status_code=404, detail="Aircraft not found")
+    return aircraft
+
+
+@app.patch("/api/aircraft/{aircraft_id}")
+async def update_aircraft_endpoint(aircraft_id: str, data: dict):
+    ok = update_aircraft(aircraft_id, **data)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Aircraft not found")
+    return get_aircraft(aircraft_id)
+
+
+# ============ MAINTENANCE LOG ENDPOINTS ============
+
+@app.post("/api/aircraft/{aircraft_id}/maintenance")
+async def add_maintenance_endpoint(aircraft_id: str, note: str, service_date: Optional[str] = None):
+    try:
+        log_id = add_maintenance_log(aircraft_id, note, service_date)
+        logs = get_maintenance_logs(aircraft_id)
+        for log in logs:
+            if log["id"] == log_id:
+                return log
+        raise HTTPException(status_code=500, detail="Failed to create log")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/aircraft/{aircraft_id}/maintenance")
+async def get_maintenance_endpoint(aircraft_id: str):
+    return get_maintenance_logs(aircraft_id)
+
+
+# ============ FLIGHT TAGS ============
+
+@app.patch("/api/flights/{flight_id}/tags")
+async def update_flight_tags_endpoint(flight_id: str, tags: str):
+    ok = update_flight_tags(flight_id, tags)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Flight not found")
+    return {"id": flight_id, "tags": tags}
+
+
+# ============ FLIGHT SEARCH ============
+
+@app.get("/api/flights/search")
+async def search_flights_endpoint(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    aircraft_id: Optional[str] = None,
+    battery_id: Optional[str] = None,
+    tags: Optional[str] = None,
+    free_text: Optional[str] = None,
+):
+    flights = search_flights(
+        date_from=date_from,
+        date_to=date_to,
+        aircraft_id=aircraft_id,
+        battery_id=battery_id,
+        tags=tags,
+        free_text=free_text,
+    )
+    return [
+        FlightHeader(
+            id=f["id"],
+            filename=f["filename"],
+            aircraft=f["aircraft"] or "Unknown",
+            format=f["format"] or "unknown",
+            flight_duration=f["flight_duration"],
+            max_altitude=f["max_altitude"],
+            max_distance=f["max_distance"],
+            max_speed=f["max_speed"],
+            battery_start=f["battery_start"],
+            battery_end=f["battery_end"],
+            has_full_telemetry=f["has_full_telemetry"],
+            gps_point_count=f["gps_point_count"],
+        )
+        for f in flights
+    ]
+
+
+# ============ FLIGHT COMPARISON ============
+
+@app.post("/api/flights/compare")
+async def compare_flights(flight_ids: List[str]):
+    if len(flight_ids) < 2 or len(flight_ids) > 4:
+        raise HTTPException(status_code=400, detail="Select 2-4 flights to compare")
+    
+    flights = get_flights_for_comparison(flight_ids)
+    if len(flights) != len(flight_ids):
+        raise HTTPException(status_code=404, detail="One or more flights not found")
+    
+    # Return normalized telemetry for comparison
+    result = []
+    for f in flights:
+        telemetry = f.get("telemetry", [])
+        if not telemetry:
+            continue
+        # Normalize time to 0..1 for overlay
+        start_time = telemetry[0]["timestamp"]
+        end_time = telemetry[-1]["timestamp"]
+        duration = end_time - start_time
+        normalized = []
+        for p in telemetry:
+            norm_time = (p["timestamp"] - start_time) / duration if duration > 0 else 0
+            normalized.append({
+                "norm_time": norm_time,
+                "time": p["timestamp"],
+                "altitude": p["altitude"],
+                "speed": p["horizontal_speed"],
+                "battery": p["battery_percent"],
+            })
+        result.append({
+            "id": f["id"],
+            "filename": f["filename"],
+            "aircraft": f["aircraft"],
+            "duration": duration,
+            "telemetry": normalized,
+        })
+    
+    return result
 
 
 if __name__ == "__main__":
