@@ -218,7 +218,7 @@ function App() {
             ) : selectedFlightData && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 space-y-6">
-                  <FlightMapSection telemetry={selectedFlightData.telemetry} />
+                  <FlightMapSection telemetry={selectedFlightData.telemetry} pois={selectedFlightData.pois} />
                   <ChartsPanel telemetry={selectedFlightData.telemetry} />
                 </div>
                 <div className="space-y-6">

@@ -12,10 +12,12 @@ from pydantic import BaseModel
 
 try:
     from pydjirecord import DJILog
+    from pydjirecord.frame.builder import records_to_frames
     PYDJIRECORD_AVAILABLE = True
 except ImportError:
     PYDJIRECORD_AVAILABLE = False
     DJILog = None
+    records_to_frames = None
 
 from db import (
     save_flight, get_flight, list_flights, delete_flight,
@@ -63,6 +65,7 @@ class FlightHeader(BaseModel):
     tags: Optional[str] = None
     battery_id: str = ""
     aircraft_id: str = ""
+    firmware: Optional[dict] = None
 
 
 def _flight_header_from_record(f: dict) -> "FlightHeader":
@@ -84,6 +87,7 @@ def _flight_header_from_record(f: dict) -> "FlightHeader":
         tags=f.get("tags"),
         battery_id=f.get("battery_id") or "",
         aircraft_id=f.get("aircraft_id") or "",
+        firmware=f.get("firmware") or None,
     )
 
 
@@ -103,6 +107,15 @@ class FlightTelemetry(BaseModel):
     rc_signal: int
     temperature: float
     phase: str
+    flight_mode: str = ""
+
+
+class PointOfInterest(BaseModel):
+    type: str  # "home" | "photo" | "video_start" | "rth"
+    label: str
+    latitude: float
+    longitude: float
+    timestamp: Optional[int] = None  # ms since flight start; None for the home point
 
 
 class FlightDetail(BaseModel):
@@ -110,6 +123,7 @@ class FlightDetail(BaseModel):
     header: FlightHeader
     telemetry: List[FlightTelemetry]
     statistics: dict
+    pois: List[PointOfInterest] = []
 
 
 class BatteryHealth(BaseModel):
@@ -221,16 +235,22 @@ async def upload_flight(file: UploadFile = File(...)):
     aircraft_name = details.aircraft_name or details.product_type.name.replace("_", " ").title()
 
     # v12 logs need no decryption; v13+ logs need a DJI API key to fetch keychains.
+    records = []
     frames = []
     try:
         if log.version < 13:
-            frames = log.frames(None)
+            records = log.records(None)
         elif DJI_API_KEY:
             keychains = log.fetch_keychains(DJI_API_KEY)
-            frames = log.frames(keychains)
+            records = log.records(keychains)
         # else: v13+ log with no API key configured — header-only, as documented in the README
+        if records:
+            frames = records_to_frames(records, details)
     except Exception:
-        frames = []
+        records, frames = [], []
+
+    firmware = _extract_firmware(records)
+    pois = _extract_pois(frames)
 
     has_full_telemetry = len(frames) > 0
     telemetry_points = [
@@ -250,6 +270,7 @@ async def upload_flight(file: UploadFile = File(...)):
             rc_signal=f.rc.downlink_signal or 0,
             temperature=f.battery.temperature,
             phase=detect_flight_phase(f.osd.height, f.osd.z_speed, f.osd.h_speed),
+            flight_mode=f.osd.flyc_state.name if f.osd.flyc_state else "",
         )
         for f in frames
     ]
@@ -271,6 +292,7 @@ async def upload_flight(file: UploadFile = File(...)):
         battery_end=telemetry_points[-1].battery_percent if telemetry_points else 0,
         has_full_telemetry=has_full_telemetry,
         gps_point_count=len(telemetry_points),
+        firmware=firmware or None,
     )
 
     battery_id = get_or_create_battery(details.battery_sn) if details.battery_sn else ""
@@ -295,6 +317,8 @@ async def upload_flight(file: UploadFile = File(...)):
         "tags": None,
         "battery_id": battery_id,
         "aircraft_id": aircraft_id,
+        "firmware": firmware,
+        "pois": pois,
     }
     save_flight(flight_record)
 
@@ -304,6 +328,48 @@ async def upload_flight(file: UploadFile = File(...)):
         link_flight_to_aircraft(aircraft_id, flight_id)
 
     return header
+
+
+def _extract_firmware(records: list) -> dict:
+    """Pull component firmware versions (record_type 15 == Firmware) out of the raw record stream."""
+    firmware = {}
+    for r in records:
+        if r.record_type == 15:  # Firmware, per pydjirecord.record.__init__'s magic-number table
+            firmware[r.data.sender_type.name] = r.data.version
+    return firmware
+
+
+def _extract_pois(frames: list) -> list:
+    """Derive point-of-interest markers from decoded frames: home point, photo/video
+    capture locations, and the point return-to-home was triggered. There is no
+    pre-planned mission waypoint data in a DJI Fly manual-flight log to draw on."""
+    pois = []
+
+    home = next((f.home for f in frames if f.home.latitude or f.home.longitude), None)
+    if home:
+        pois.append({"type": "home", "label": "Home Point", "latitude": home.latitude, "longitude": home.longitude, "timestamp": None})
+
+    prev_photo = prev_video = False
+    prev_go_home_standby = True
+    for f in frames:
+        if f.osd.latitude == 0 and f.osd.longitude == 0:
+            continue
+        ts = int(f.osd.fly_time * 1000)
+
+        if f.camera.is_photo and not prev_photo:
+            pois.append({"type": "photo", "label": "Photo Captured", "latitude": f.osd.latitude, "longitude": f.osd.longitude, "timestamp": ts})
+        prev_photo = f.camera.is_photo
+
+        if f.camera.is_video and not prev_video:
+            pois.append({"type": "video_start", "label": "Video Recording Started", "latitude": f.osd.latitude, "longitude": f.osd.longitude, "timestamp": ts})
+        prev_video = f.camera.is_video
+
+        is_standby = f.osd.go_home_status is None or f.osd.go_home_status.name == "STANDBY"
+        if not is_standby and prev_go_home_standby:
+            pois.append({"type": "rth", "label": "Return-to-Home Triggered", "latitude": f.osd.latitude, "longitude": f.osd.longitude, "timestamp": ts})
+        prev_go_home_standby = is_standby
+
+    return pois
 
 
 def detect_flight_phase(alt: float, v_speed: float, h_speed: float) -> str:
@@ -364,6 +430,7 @@ async def get_flight_endpoint(flight_id: str):
         header=_flight_header_from_record(flight),
         telemetry=[FlightTelemetry(**t) for t in telemetry],
         statistics=stats,
+        pois=[PointOfInterest(**p) for p in flight.get("pois", [])],
     )
 
 

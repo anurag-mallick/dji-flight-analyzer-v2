@@ -2,7 +2,7 @@ import React from 'react'
 import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import L from 'leaflet'
-import { DJITelemetryPoint } from '../lib/djiParser'
+import { DJITelemetryPoint, PointOfInterest } from '../lib/djiParser'
 
 // Fix Leaflet default icon issue
 const DefaultIcon = L.icon({
@@ -20,6 +20,14 @@ interface MapViewProps {
   currentIndex: number
   mapStyle: string
   onMapStyleChange: (style: string) => void
+  pois: PointOfInterest[]
+}
+
+const POI_STYLES: Record<PointOfInterest['type'], { color: string; label: string }> = {
+  home: { color: '#16a34a', label: 'Home Point' },
+  photo: { color: '#eab308', label: 'Photo' },
+  video_start: { color: '#a855f7', label: 'Video Start' },
+  rth: { color: '#dc2626', label: 'Return-to-Home Triggered' },
 }
 
 // Google's tile servers are not a documented public API, and using them outside
@@ -37,7 +45,7 @@ const TILE_LAYERS: Record<string, string> = {
 }
 const GOOGLE_SUBDOMAINS = ['0', '1', '2', '3']
 
-export function MapView({ validPoints, currentIndex, mapStyle, onMapStyleChange }: MapViewProps) {
+export function MapView({ validPoints, currentIndex, mapStyle, onMapStyleChange, pois }: MapViewProps) {
   if (validPoints.length === 0) {
     return (
       <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
@@ -129,6 +137,20 @@ export function MapView({ validPoints, currentIndex, mapStyle, onMapStyleChange 
               </div>
             </Popup>
           </CircleMarker>
+
+          {pois.map((poi, i) => (
+            <CircleMarker
+              key={`${poi.type}-${i}`}
+              center={[poi.latitude, poi.longitude]}
+              radius={6}
+              color={POI_STYLES[poi.type].color}
+              fillColor={POI_STYLES[poi.type].color}
+              fillOpacity={0.9}
+              weight={2}
+            >
+              <Popup>{poi.label}</Popup>
+            </CircleMarker>
+          ))}
         </MapContainer>
       </div>
     </div>

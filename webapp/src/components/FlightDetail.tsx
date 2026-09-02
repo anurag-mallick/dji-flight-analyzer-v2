@@ -55,6 +55,20 @@ export function FlightDetail({ header, onTagsUpdated }: FlightDetailProps) {
         <StatCard label="Battery" value={header.battery_start > 0 ? `${header.battery_start}% → ${header.battery_end}%` : '—'} />
       </div>
 
+      {header.firmware && Object.keys(header.firmware).length > 0 && (
+        <div className="mt-4 pt-4 border-t border-gray-100">
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Firmware Versions</p>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {Object.entries(header.firmware).map(([component, version]) => (
+              <div key={component} className="bg-gray-50 rounded-lg px-3 py-2">
+                <p className="text-xs text-gray-500 capitalize">{component.toLowerCase().replace('_', ' ')}</p>
+                <p className="text-sm font-medium text-gray-900">{version}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-4 pt-4 border-t border-gray-100">
         <p className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Tags</p>
         {editingTags ? (

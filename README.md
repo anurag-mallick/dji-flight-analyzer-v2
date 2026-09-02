@@ -18,10 +18,13 @@ Unlike cloud-based tools like Airdata, DJI Flight Analyzer runs entirely on your
 - **Drag & drop .txt flight log upload** — multiple files, uploaded straight to the local backend for decoding and persistence
 - **Flight list** — search/filter by filename, aircraft, or tag; tag editor per flight
 - **Interactive 2D map** — Leaflet with flight path, takeoff/landing markers, OpenStreetMap/Esri satellite/OpenTopoMap layers, plus opt-in Google roadmap/satellite/hybrid tile layers (hobbyist-use only — see note in `MapView.tsx`)
-- **3D flight path view** — Three.js scene rendering the GPS track with altitude on the vertical axis (ground grid is a flat spatial reference, not real terrain elevation data)
+- **3D flight path view** — Three.js scene rendering the GPS track with altitude on the vertical axis, with an opt-in toggle to replace the flat reference grid with real terrain elevation (queries the public open-elevation.com API with this flight's approximate coordinates — off by default, and the only feature in this app that sends anything beyond map tile requests off-device)
+- **Points of interest overlay** — home point, photo/video capture locations, and return-to-home trigger point, plotted on both the 2D and 3D views (DJI Fly manual-flight logs contain no pre-planned mission waypoints, so these are derived from what the log actually records)
 - **Animated replay** — play/pause/step/speed controls that drive the map and stat readout forward through the recorded telemetry (there is no control-input data in the log, so this is a replay, not a physics simulation)
 - **Charts** — Recharts panels for altitude, speed, vertical speed, battery, voltage, GPS sats, RC signal, temperature, gimbal attitude
 - **Flight Insights** — rule-based, fully local analysis of the flight's own telemetry (GPS dropouts, weak RC signal, low landing battery, abrupt altitude changes, temperature extremes) with plain-English suggestions
+- **Wind estimation** — an approximate wind speed/direction derived from GPS drift during autopilot hover/attitude-hold segments; clearly labeled as indicative, not a calibrated measurement
+- **Firmware version detection** — flight controller/gimbal/camera/RC/battery firmware versions, when present in the log
 - **Battery view** — discharge curve, discharge rate, estimated flight time, single-flight health indicator
 - **Battery fleet tracking** — per-battery discharge-rate trend across flights, degradation status, capacity/notes editor
 - **Aircraft fleet tracking** — flight hours vs. service interval with due/overdue status, nickname/notes editor, maintenance log
@@ -35,9 +38,11 @@ Unlike cloud-based tools like Airdata, DJI Flight Analyzer runs entirely on your
 - **Statistics** — computed metrics per flight
 - **Fleet & maintenance** — aircraft/battery records auto-linked from log serial numbers, maintenance log entries, service-interval tracking
 - **Flight comparison endpoint** — normalized time-series for 2-4 flights
+- **Points of interest extraction** — home point, photo/video capture markers, RTH trigger, from the decoded frame stream
+- **Firmware version extraction** — from the log's Firmware records (record type 15), keyed by component (MC/GIMBAL/CAMERA/RC/BATTERY)
 - **Search, tagging, delete** — filter flights by date/aircraft/battery/tag/free text
 - **Export endpoints** — CSV, KML, GeoJSON
-- **Runs locally** — your data never hits the internet, except the DJI keychain API call for v13+ decryption and (optionally) map tile requests
+- **Runs locally** — your data never hits the internet, except the DJI keychain API call for v13+ decryption and (optionally) map tile requests and the opt-in terrain elevation lookup
 
 ## 📁 Project Structure
 
@@ -128,13 +133,13 @@ For real use, run both `webapp` and `local-app` together on your own machine as 
 ## 🗺 Roadmap
 
 - [ ] SQLite persistence for flight history (currently one JSON file per flight/battery/aircraft)
-- [ ] Waypoint/POI overlay on map
-- [ ] Wind estimation from drift
-- [ ] Firmware version detection
+- [x] POI overlay on map (home point, photo/video captures, RTH trigger — see note above; true mission waypoints aren't in these logs)
+- [x] Wind estimation from GPS drift during hover segments (approximate — see note above)
+- [x] Firmware version detection
+- [x] Real terrain elevation in the 3D view (opt-in, via a public elevation API)
 - [ ] Mobile-responsive touch controls
 - [ ] Dark mode
 - [ ] PWA support for offline use
-- [ ] Real terrain elevation in the 3D view (currently a flat reference grid, not elevation data)
 - [ ] Configurable backend URL so a GitHub Pages/Vercel-hosted frontend can reach a locally-running backend over CORS (deliberately not done yet — see Deployment)
 
 ## 📜 License

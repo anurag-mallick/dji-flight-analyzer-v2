@@ -23,6 +23,7 @@ export interface DJILogHeader {
   fileSize: number;
   hasFullTelemetry: boolean;
   apiKeyRequired: boolean;
+  firmware?: Record<string, string> | null;
 }
 
 export interface DJITelemetryPoint {
@@ -42,12 +43,31 @@ export interface DJITelemetryPoint {
   temperature: number;
   // Flight phase detection
   phase: 'takeoff' | 'ascent' | 'cruise' | 'descent' | 'landing' | 'unknown';
+  // Raw DJI autopilot flight mode (e.g. "GPS_ATTI", "ATTI_HOVER") — used for wind estimation
+  flightMode: string;
+}
+
+export interface PointOfInterest {
+  type: 'home' | 'photo' | 'video_start' | 'rth';
+  label: string;
+  latitude: number;
+  longitude: number;
+  timestamp: number | null;
+}
+
+export interface WindEstimate {
+  estimatedSpeedMps: number;
+  driftBearingDeg: number;
+  windFromBearingDeg: number;
+  hoverSampleSeconds: number;
+  segmentCount: number;
 }
 
 export interface DJIFlightData {
   header: DJILogHeader;
   telemetry: DJITelemetryPoint[];
   statistics: FlightStatistics;
+  pois: PointOfInterest[];
 }
 
 export interface FlightStatistics {
@@ -71,6 +91,7 @@ export interface FlightStatistics {
   // Battery health
   dischargeRate: number; // % per minute
   estimatedFlightTime: number; // minutes at current rate
+  windEstimate: WindEstimate | null;
 }
 
 // Magic bytes for DJI log format detection
@@ -228,6 +249,7 @@ export function calculateStatistics(telemetry: DJITelemetryPoint[]): FlightStati
     flightPhases: phaseDurations,
     dischargeRate,
     estimatedFlightTime: dischargeRate > 0 ? (telemetry[telemetry.length - 1]?.batteryPercent || 0) / dischargeRate : 0,
+    windEstimate: estimateWind(telemetry),
   };
 }
 
@@ -240,6 +262,59 @@ function emptyStatistics(): FlightStatistics {
     maxRcSignal: 0, minRcSignal: 0,
     maxTemperature: 0, minTemperature: 0,
     flightPhases: {}, dischargeRate: 0, estimatedFlightTime: 0,
+    windEstimate: null,
+  };
+}
+
+const HOVER_FLIGHT_MODES = new Set(['HOVER', 'ATTI_HOVER', 'GPS_ATTI', 'GPS_BLAKE']);
+const METERS_PER_DEG_LAT = 111320;
+
+/**
+ * Estimate wind speed/direction from GPS drift during autopilot hover/attitude-hold
+ * segments (verified DJI flight-mode values). This is an approximation, not a
+ * calibrated wind measurement: it assumes the autopilot is trying to hold position
+ * during these modes, so any net drift is attributable to wind rather than pilot input.
+ * Direction is derived purely from lat/lon deltas (an unambiguous WGS84 convention),
+ * deliberately avoiding the aircraft's raw body-frame velocity axes, whose sign/axis
+ * convention is not documented by the underlying log parser.
+ */
+export function estimateWind(telemetry: DJITelemetryPoint[]): WindEstimate | null {
+  const segments: DJITelemetryPoint[][] = [];
+  let current: DJITelemetryPoint[] = [];
+  for (const p of telemetry) {
+    const isHover = HOVER_FLIGHT_MODES.has(p.flightMode) && (p.latitude !== 0 || p.longitude !== 0);
+    if (isHover) {
+      current.push(p);
+    } else {
+      if (current.length >= 5) segments.push(current);
+      current = [];
+    }
+  }
+  if (current.length >= 5) segments.push(current);
+  if (segments.length === 0) return null;
+
+  let totalEast = 0, totalNorth = 0, totalSeconds = 0;
+  for (const seg of segments) {
+    const start = seg[0], end = seg[seg.length - 1];
+    const dtSeconds = (end.timestamp - start.timestamp) / 1000;
+    if (dtSeconds <= 0) continue;
+    const metersPerDegLon = METERS_PER_DEG_LAT * Math.cos((start.latitude * Math.PI) / 180);
+    totalEast += (end.longitude - start.longitude) * metersPerDegLon;
+    totalNorth += (end.latitude - start.latitude) * METERS_PER_DEG_LAT;
+    totalSeconds += dtSeconds;
+  }
+  if (totalSeconds < 5) return null; // too little hover time sampled to trust an estimate
+
+  const speed = Math.hypot(totalEast, totalNorth) / totalSeconds;
+  const driftBearing = (Math.atan2(totalEast, totalNorth) * 180 / Math.PI + 360) % 360;
+  const windFromBearing = (driftBearing + 180) % 360;
+
+  return {
+    estimatedSpeedMps: Math.round(speed * 100) / 100,
+    driftBearingDeg: Math.round(driftBearing),
+    windFromBearingDeg: Math.round(windFromBearing),
+    hoverSampleSeconds: Math.round(totalSeconds * 10) / 10,
+    segmentCount: segments.length,
   };
 }
 
@@ -370,6 +445,7 @@ export interface BackendFlightSummary {
   tags: string | null;
   battery_id: string;
   aircraft_id: string;
+  firmware: Record<string, string> | null;
 }
 
 export interface BackendTelemetryPoint {
@@ -388,6 +464,15 @@ export interface BackendTelemetryPoint {
   rc_signal: number;
   temperature: number;
   phase: string;
+  flight_mode: string;
+}
+
+export interface BackendPointOfInterest {
+  type: 'home' | 'photo' | 'video_start' | 'rth';
+  label: string;
+  latitude: number;
+  longitude: number;
+  timestamp: number | null;
 }
 
 export interface BackendFlightDetail {
@@ -395,6 +480,7 @@ export interface BackendFlightDetail {
   header: BackendFlightSummary;
   telemetry: BackendTelemetryPoint[];
   statistics: Record<string, number | Record<string, number>>;
+  pois: BackendPointOfInterest[];
 }
 
 /**
@@ -421,6 +507,7 @@ export function backendDetailToFlightData(detail: BackendFlightDetail): DJIFligh
     rcSignalStrength: p.rc_signal,
     temperature: p.temperature,
     phase: (p.phase as DJITelemetryPoint['phase']) || 'unknown',
+    flightMode: p.flight_mode || '',
   }));
 
   const header: DJILogHeader = {
@@ -444,9 +531,11 @@ export function backendDetailToFlightData(detail: BackendFlightDetail): DJIFligh
     fileSize: 0,
     hasFullTelemetry: h.has_full_telemetry,
     apiKeyRequired: false,
+    firmware: h.firmware,
   };
 
   const statistics = telemetry.length > 0 ? calculateStatistics(telemetry) : emptyStatistics();
+  const pois: PointOfInterest[] = detail.pois.map(p => ({ ...p }));
 
-  return { header, telemetry, statistics };
+  return { header, telemetry, statistics, pois };
 }

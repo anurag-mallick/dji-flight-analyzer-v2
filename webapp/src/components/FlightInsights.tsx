@@ -14,6 +14,11 @@ const LEVEL_ICONS: Record<InsightLevel, string> = {
   good: '✓',
 }
 
+const COMPASS_POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
+function compassLabel(bearingDeg: number): string {
+  return COMPASS_POINTS[Math.round(bearingDeg / 22.5) % 16]
+}
+
 interface FlightInsightsProps {
   telemetry: DJITelemetryPoint[]
   statistics: FlightStatistics
@@ -47,6 +52,20 @@ export function FlightInsights({ telemetry, statistics }: FlightInsightsProps) {
             <p className="text-xs mt-1 opacity-90">{insight.detail}</p>
           </div>
         ))}
+
+        {statistics.windEstimate && (
+          <div className="border rounded-lg p-3 bg-sky-50 border-sky-200 text-sky-900">
+            <p className="text-sm font-medium flex items-center gap-2">
+              <span>🌬</span>
+              Estimated wind: ~{statistics.windEstimate.estimatedSpeedMps} m/s from the {compassLabel(statistics.windEstimate.windFromBearingDeg)}
+            </p>
+            <p className="text-xs mt-1 opacity-90">
+              Derived from GPS drift during {statistics.windEstimate.segmentCount} autopilot hover/attitude-hold segment(s)
+              totaling {statistics.windEstimate.hoverSampleSeconds}s. This is an approximation based on drift, not a
+              calibrated wind measurement — treat it as indicative only.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   )

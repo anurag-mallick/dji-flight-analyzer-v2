@@ -1,10 +1,15 @@
 import React, { useMemo, useState } from 'react'
-import { DJITelemetryPoint } from '../lib/djiParser'
+import { DJITelemetryPoint, PointOfInterest } from '../lib/djiParser'
 import { MapView } from './MapView'
 import { Map3DView } from './Map3DView'
 import { PlaybackControls } from './PlaybackControls'
 
-export function FlightMapSection({ telemetry }: { telemetry: DJITelemetryPoint[] }) {
+interface FlightMapSectionProps {
+  telemetry: DJITelemetryPoint[]
+  pois: PointOfInterest[]
+}
+
+export function FlightMapSection({ telemetry, pois }: FlightMapSectionProps) {
   const [mode, setMode] = useState<'2d' | '3d'>('2d')
   const [mapStyle, setMapStyle] = useState('osm')
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -37,9 +42,9 @@ export function FlightMapSection({ telemetry }: { telemetry: DJITelemetryPoint[]
       </div>
 
       {mode === '2d' ? (
-        <MapView validPoints={validPoints} currentIndex={safeIndex} mapStyle={mapStyle} onMapStyleChange={setMapStyle} />
+        <MapView validPoints={validPoints} currentIndex={safeIndex} mapStyle={mapStyle} onMapStyleChange={setMapStyle} pois={pois} />
       ) : (
-        <Map3DView validPoints={validPoints} currentIndex={safeIndex} />
+        <Map3DView validPoints={validPoints} currentIndex={safeIndex} pois={pois} />
       )}
 
       <PlaybackControls points={validPoints} currentIndex={safeIndex} onSeek={setCurrentIndex} />
